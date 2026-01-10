@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import cookieParser from "cookie-parser";
 import authRoute from "./routes/auth.routes"
+import userRouter from "./routes/user.routes"
 
 dotenv.config();
 
@@ -32,7 +33,8 @@ const startServer = async () => {
     await connectDB();
 }
 
-app.use("/v1/auth", authRoute)
+app.use("/v1/auth", authRoute);
+app.use("/v1/user", userRouter);
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);
