@@ -87,17 +87,22 @@
 
 import { Request, Response } from "express";
 import { authService } from "../services/auth.services";
+import { JwtPayload } from "jsonwebtoken";
+import { asyncHandler } from "../utils/asyncHandler";
+import { AppError } from "../utils/AppError";
+
+// interface AuthPayload extends JwtPayload{
+//   id
+// }
 
 const authController = {
 
-  registerUser: async (req: Request, res: Response) => {
-    try {
+  registerUser: asyncHandler(async (req, res) => {
+   
       const { username, email, password } = req.body;
 
       if (!username || !email || !password) {
-        return res.status(400).json({
-          message: "Missing required fields"
-        });
+        throw new AppError("Missing required fields", 400)
       }
 
       const user = await authService.register(
@@ -111,47 +116,30 @@ const authController = {
         user
       });
 
-    } catch (error) {
-      return res.status(500).json({
-        message: "Register failed"
-      });
-    }
-  },
+  }),
 
-  loginUser: async (req: Request, res: Response) => {
-    try {
-      const { email, password } = req.body;
+  loginUser: asyncHandler(async(req, res) => {
+    const { email, password } = req.body;
 
-      const {user, accessToken, refreshToken} = 
-      await authService.login(email, password);
+    const {user, accessToken, refreshToken} = 
+    await authService.login(email, password);
 
-      res.cookie("refreshToken",refreshToken, {
-        httpOnly: true,
-        secure: false,
-        path:"/",
-        sameSite: "strict",
-        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    res.cookie("refreshToken",refreshToken, {
+      httpOnly: true,
+      secure: false,
+      path:"/",
+      sameSite: "strict",
+      maxAge: 7 * 24 * 60 * 60 * 1000 
 
-      })
+    })
 
-      return res.status(200).json({
-        message: "Login success",
-        user,
-        accessToken
-      });
+    return res.status(200).json({
+      message: "Login success",
+      user,
+      accessToken
+    });
 
-    } catch (error: any) {
-      if (error.message === "INVALID_CREDENTIALS") {
-        return res.status(401).json({
-          message: "Invalid email or password"
-        });
-      }
-
-      return res.status(500).json({
-        message: "Login failed"
-      });
-    }
-  },
+  }),
 
   requestRefreshToken : async(req: Request, res: Response) => {
     try{
@@ -185,6 +173,28 @@ const authController = {
 
       return res.status(500).json({
         message: "Refresh token failed"
+      });
+    }
+  },
+
+  logout: async(req: Request, res: Response) => {
+    try{
+      const user = req.user as JwtPayload
+      await authService.logout(user.id);
+
+      res.clearCookie("refreshToken", {
+        httpOnly: true,
+        secure: false,
+        sameSite: "strict",
+        path: "/"
+      });
+
+      return res.status(200).json({
+        message: "Logout Success"
+      })
+    }catch(error){
+      return res.status(500).json({
+        message: "Logout failed"
       });
     }
   }

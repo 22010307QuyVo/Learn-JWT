@@ -5,6 +5,7 @@ import mongoose from "mongoose";
 import cookieParser from "cookie-parser";
 import authRoute from "./routes/auth.routes"
 import userRouter from "./routes/user.routes"
+import { errorHandler } from "./middlewares/errorHandler";
 
 dotenv.config();
 
@@ -35,6 +36,9 @@ const startServer = async () => {
 
 app.use("/v1/auth", authRoute);
 app.use("/v1/user", userRouter);
+
+app.use(errorHandler);
+
 
 app.listen(PORT, () => {
     console.log(`🚀 Server running on port ${PORT}`);

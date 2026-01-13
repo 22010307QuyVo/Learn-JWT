@@ -7,6 +7,9 @@ import {
 } from "../services/token.services";
 import { saveRefreshToken } from "./refreshToken.service";
 import redis from "../config/redis.config";
+import { AppError } from "../utils/AppError";
+import { generateKeyPair } from "../utils/crypto.util";
+import { KeyStoreService } from "../services/keyToken.services";
 
 interface RefreshPayload extends JwtPayload {
   id: string;
@@ -14,7 +17,6 @@ interface RefreshPayload extends JwtPayload {
 }
 
 export const authService = {
-
   register: async (username: string, email: string, password: string) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
@@ -26,34 +28,44 @@ export const authService = {
     });
 
     const user = await newUser.save();
+    if (!user) {
+      throw new AppError("REGISTER_FAILED", 400);
+    }
+
     return user;
   },
 
   login: async (email: string, password: string) => {
-    const user = await User
-      .findOne({ email })
-      .select("+password");
+    const user = await User.findOne({ email }).select("+password");
 
     if (!user) {
-      throw new Error("INVALID_CREDENTIALS");
+      throw new AppError("INVALID_CREDENTIALS", 401);
     }
 
     const isValid = await bcrypt.compare(password, user.password);
     if (!isValid) {
-      throw new Error("INVALID_CREDENTIALS");
+      throw new AppError("INVALID_CREDENTIALS", 401);
     }
 
-    const accessToken = generateAccessToken({
-      id: user.id,
-      admin: user.admin
-    });
+    const { publicKey, privateKey } = generateKeyPair();
 
-    const refreshToken = generateRefreshToken({
-      id: user.id,
-      admin: user.admin
-    });
+    const accessToken = generateAccessToken(
+      { id: user.id, admin: user.admin },
+      privateKey
+    );
+
+    const refreshToken = generateRefreshToken(
+      { id: user.id, admin: user.admin },
+      privateKey
+    );
 
     await saveRefreshToken(user.id, refreshToken);
+
+    await KeyStoreService.createKeyStore({
+      userId: user.id,
+      publicKey,
+      refreshToken
+    });
 
     const userObj = user.toObject();
     const { password: _, ...safeUser } = userObj;
@@ -65,61 +77,71 @@ export const authService = {
     };
   },
 
-
-  requestRefreshToken : async(refreshToken: string) => {
-    const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_KEY;
+  requestRefreshToken: async (refreshToken: string) => {
     const REFRESH_TOKEN_TTL = 7 * 24 * 60 * 60;
-
-    if (!JWT_REFRESH_SECRET) {
-      throw new Error("SERVER_CONFIG_ERROR");
-    }
 
     let decoded: RefreshPayload;
 
     try {
-      decoded = jwt.verify(
-        refreshToken,
-        JWT_REFRESH_SECRET
-      ) as JwtPayload as RefreshPayload;
+      decoded = jwt.decode(refreshToken) as RefreshPayload;
     } catch {
-      throw new Error("INVALID_REFRESH_TOKEN");
+      throw new AppError("INVALID_REFRESH_TOKEN", 403);
     }
 
-    if (!decoded.id || typeof decoded.admin !== "boolean") {
-      throw new Error("INVALID_REFRESH_TOKEN");
+    if (!decoded?.id) {
+      throw new AppError("INVALID_REFRESH_TOKEN", 403);
     }
 
     const redisKey = `refreshToken:${decoded.id}`;
-
     const storedToken = await redis.get(redisKey);
 
     if (!storedToken || storedToken !== refreshToken) {
-      await redis.del(redisKey); // revoke toàn bộ session
-      throw new Error("INVALID_REFRESH_TOKEN");
+      await redis.del(redisKey);
+      throw new AppError("INVALID_REFRESH_TOKEN", 403);
     }
 
-    
+    const keyStore = await KeyStoreService.findByUserId(decoded.id);
+    if (!keyStore) {
+      await redis.del(redisKey);
+      throw new AppError("INVALID_REFRESH_TOKEN", 403);
+    }
 
-    const newAccessToken = generateAccessToken({
-      id: decoded.id,
-      admin: decoded.admin
-    });
+    // Verify trước, rồi mới check used
+    try {
+      jwt.verify(refreshToken, keyStore.publicKey);
+    } catch {
+      await redis.del(redisKey);
+      throw new AppError("INVALID_REFRESH_TOKEN", 403);
+    }
 
-    const newRefreshToken = generateRefreshToken({
-      id: decoded.id,
-      admin: decoded.admin
-    });
+    const isUsed = await KeyStoreService.isRefreshTokenUsed(decoded.id, refreshToken);
+    if (isUsed) {
+      await redis.del(redisKey);
+      await KeyStoreService.deleteByUserId(decoded.id);
+      throw new AppError("TOKEN_REUSE_DETECTED", 403);
+    }
 
-    await redis.set(
-      redisKey,
-      newRefreshToken,
-      "EX",
-      REFRESH_TOKEN_TTL
+    const newAccessToken = generateAccessToken(
+      { id: decoded.id, admin: decoded.admin },
+      keyStore.privateKey
     );
+
+    const newRefreshToken = generateRefreshToken(
+      { id: decoded.id, admin: decoded.admin },
+      keyStore.privateKey
+    );
+
+    await redis.set(redisKey, newRefreshToken, "EX", REFRESH_TOKEN_TTL);
 
     return {
       accessToken: newAccessToken,
       refreshToken: newRefreshToken
     };
+  },
+
+  logout: async (userId: string) => {
+    const redisKey = `refreshToken:${userId}`;
+    await redis.del(redisKey);
+    await KeyStoreService.deleteByUserId(userId);
   }
 };
